@@ -1,224 +1,350 @@
 # devtools-lockdown
 
-Kill the page the moment someone opens DevTools.
+> **Production-grade anti-DevTools detection and page protection for modern web applications.**  
+> Instantly detects DevTools inspection across multi-layered traps, halts pending network calls, eradicates the DOM, and neutralizes runtime access.
 
-Built this after getting tired of people poking around production apps with the inspector. It's not bulletproof (nothing client-side ever is), but it raises the bar from "right-click inspect" to "actually know what you're doing."
+---
 
-## What it does
+## Why devtools-lockdown?
 
-When DevTools opens, the page goes blank. Network requests stop. Console is dead. The user sees `about:blank`. There's nothing to recover — no back button, no cached DOM, no pending API calls.
+Client-side code running in production is constantly probed by automated scrapers, curious visitors, and unauthorized inspectors using browser developer tools. 
 
-## How it works
+While client-side protection is **never a replacement for server-side security**, `devtools-lockdown` significantly raises the technical barrier:
+* **Multi-Layer Detection** — If an attacker disables timers, geometry or bait traps catch them.
+* **Instant Hardened Cutoff** — All network interfaces (`fetch`, `XMLHttpRequest`, `WebSocket`, `sendBeacon`) are permanently replaced with hardened stub classes.
+* **DOM Eradication** — The DOM tree is wiped clean down to the root, page title is reset, and the session navigates to `about:blank`.
+* **Zero False Positives** — Automatic bypass for Google Lighthouse, PageSpeed Insights, and headless audit bots, with intelligent mobile/touch detection.
 
-Four independent detection layers run in parallel. Disabling one doesn't help — the others catch it.
+---
 
-### Layer 1: Debugger timing trap
-
-A `debugger` statement runs on a loop (both `setInterval` and `requestAnimationFrame`, so killing one timer doesn't stop the other). Normally it executes in under a millisecond. When DevTools is open, the browser pauses on it — even briefly — and the elapsed time jumps past the threshold. Game over.
+## How It Works (Multi-Layer Architecture)
 
 ```
-Normal execution:    debugger → 0.02ms → carry on
-DevTools open:       debugger → 150ms+ → detected → page wiped
+                               ┌─────────────────────────────┐
+                               │     devtools-lockdown       │
+                               └──────────────┬──────────────┘
+                                              │
+         ┌──────────────────┬─────────────────┼─────────────────┬──────────────────┐
+         │                  │                 │                 │                  │
+         ▼                  ▼                 ▼                 ▼                  ▼
+┌─────────────────┐ ┌───────────────┐ ┌───────────────┐ ┌───────────────┐ ┌────────────────┐
+│  Layer 1:       │ │  Layer 2:     │ │  Layer 3:     │ │  Layer 4:     │ │  Layer 5:      │
+│  Debugger Trap  │ │  Window Delta │ │  Element Bait │ │  Console Kill │ │  Input Guard   │
+│  (Interval+rAF) │ │  (Docked UI)  │ │  (Getter Trap)│ │  (20 Methods) │ │  (Keys/Clicks) │
+└────────┬────────┘ └───────┬───────┘ └───────┬───────┘ └───────┬───────┘ └────────┬───────┘
+         │                  │                 │                 │                  │
+         └──────────────────┴────────┬────────┴─────────────────┴──────────────────┘
+                                     │
+                             DevTools Detected
+                                     │
+                    ┌────────────────┴────────────────┐
+                    ▼                                 ▼
+         ┌─────────────────────┐           ┌─────────────────────┐
+         │ Kill Network        │           │ Wipe Page & DOM     │
+         │ • fetch → reject    │           │ • document.wipe()   │
+         │ • XHR / WS blocked  │           │ • title = ""        │
+         │ • sendBeacon = noop │           │ • goto about:blank  │
+         └─────────────────────┘           └─────────────────────┘
 ```
 
-The dual-channel approach (interval + rAF) exists because some people try to break out by pausing the interval. rAF keeps firing independently, and vice versa.
+### 1. Dual-Channel Debugger Timing Trap
+A `debugger` statement executes within a dual-loop channel (`setInterval` + `requestAnimationFrame`). During normal execution, it executes in $< 1\text{ms}$. When DevTools is open, the JavaScript runtime pauses, causing the delta to exceed the threshold ($> 100\text{ms}$) and triggering lockdown. Pausing or clearing one timer does not stop the independent rAF channel.
 
-### Layer 2: Element probe (getter trap)
+### 2. Window Geometry & Viewport Delta Detection
+When a user docks DevTools to the side or bottom of the browser, the difference between outer and inner window dimensions (`window.outerWidth - window.innerWidth` or `window.outerHeight - window.innerHeight`) expands beyond normal window frame borders ($> 160\text{px}$). Monitored continuously via timer and window `resize` events.
 
-We create a dummy DOM element and define a getter on its `id` property. Then we `console.debug()` it every few seconds. Here's the trick: when DevTools is closed, the browser doesn't bother evaluating the logged object. But when the console panel is open (even in the background), the browser calls the getter to render the object in the console. That getter fires our detection callback.
+### 3. Element Bait Probe (Getter Trap)
+Creates a dummy DOM element with an instrumented `id` property getter trap and logs it periodically via `console.debug(bait)`. Modern browser engines only evaluate object properties when rendering them inside an active console panel. Opening the console triggers the getter trap.
 
-This catches the case where someone opens DevTools *before* navigating to the page, which would dodge the timing trap if they're quick enough with breakpoints.
+### 4. Hardened Network Kill Switch
+When triggered, network capability is severed immediately:
+* `window.fetch` rejects all requests immediately.
+* `window.XMLHttpRequest` is sealed with a safe mock class returning empty state (`status: 0`, `readyState: 4`).
+* `window.WebSocket` is sealed with a non-functional mock class.
+* `navigator.sendBeacon` is disabled.
 
-### Layer 3: Console neutralization
+### 5. DOM & Navigation Eradication
+Every child node of `document.documentElement` is removed, the page title is blanked, and `window.location.replace('about:blank')` is executed to prevent back-button or cached history recovery.
 
-Every `console` method gets replaced with a no-op. `log`, `warn`, `error`, `debug`, `table`, `dir` — all of them. Even if someone manages to keep DevTools open for a split second, there's nothing useful in the console.
+### 6. Universal Console Neutralization
+Replaces 20+ `console` methods (`log`, `warn`, `error`, `info`, `debug`, `trace`, `table`, `dir`, `group`, `time`, etc.) with no-ops to eliminate data leakage.
 
-### Layer 4: Input blocking
+### 7. Input & Shortcut Interception
+Blocks standard inspection keystrokes and browser actions:
+* `F12`
+* `Ctrl+Shift+I`, `Ctrl+Shift+J`, `Ctrl+Shift+C` (or `Cmd+Option+I/J/C` on macOS)
+* `Ctrl+U` / `Cmd+U` (View Page Source)
+* `Ctrl+S` / `Cmd+S` (Save Page)
+* Right-click Context Menu (`contextmenu` preventDefault)
+* Drag-to-save (`dragstart` preventDefault)
 
-- **Keyboard shortcuts** — F12, Ctrl+Shift+I, Ctrl+Shift+J, Ctrl+Shift+C, Ctrl+U (view source), Ctrl+S (save page) are all intercepted and cancelled.
-- **Context menu** — Right-click is disabled. No "Inspect Element."
-- **Drag** — Drag events are killed, preventing save-as via drag-and-drop.
+### 8. Audit Bot & Mobile Adaptation
+Automatically bypasses active traps when running under audit engines:
+* Google Lighthouse & PageSpeed Insights
+* Headless Chrome / Headless Chromium
+* Selenium / Puppeteer / Playwright (`navigator.webdriver`)
+* Restricts aggressive debugger traps on mobile browsers to prevent false positives from soft-keyboard resizing.
 
-### What about mobile?
+---
 
-The active detection layers (debugger traps, element probes) only run on desktop. Mobile browsers don't have DevTools, and these techniques cause false positives on some mobile engines. The passive layers (console neutralization, shortcut blocking, context menu) still apply everywhere.
-
-### Audit bot bypass
-
-Lighthouse, PageSpeed Insights, and headless Chrome are automatically detected and skipped. Your performance scores won't be affected.
-
-## Install
+## Installation
 
 ```bash
+# npm
 npm install devtools-lockdown
+
+# pnpm
+pnpm add devtools-lockdown
+
+# yarn
+yarn add devtools-lockdown
+
+# bun
+bun add devtools-lockdown
 ```
 
-## Usage
+---
 
-Call it once, as early as possible. Before your framework mounts, before your router initializes — ideally right in your entry file.
+## Quick Start
 
-```js
+Call `lockdown()` as early as possible in your client entry file:
+
+```typescript
 import { lockdown } from 'devtools-lockdown';
 
+// Activate with zero-config defaults
 lockdown();
 ```
 
-That's it. Zero config needed for the default behavior (detect, wipe, redirect to about:blank).
+---
 
-### With options
+## Framework Integration
 
-```js
-import { lockdown } from 'devtools-lockdown';
+### React (Vite)
 
-lockdown({
-  // Fire analytics before the page dies
-  onDetected: () => {
-    navigator.sendBeacon('/api/security-event', JSON.stringify({
-      event: 'devtools_detected',
-      url: location.href,
-      timestamp: Date.now(),
-    }));
-  },
-
-  // How often to run the debugger trap (ms)
-  trapInterval: 1000,
-
-  // How often to run the element probe (ms)
-  probeInterval: 3000,
-
-  // Debugger pause threshold (ms) — lower = more sensitive
-  threshold: 100,
-
-  // Set to false to just get the callback without killing the page
-  killPage: true,
-
-  // Toggle individual protection layers
-  blockShortcuts: true,
-  blockContextMenu: true,
-  neutralizeConsole: true,
-  blockDrag: true,
-});
-```
-
-### Framework examples
-
-**React (Vite)**
 ```tsx
-// main.tsx
+// src/main.tsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
 import { lockdown } from 'devtools-lockdown';
+import App from './App';
 
+// Only run in production
 if (import.meta.env.PROD) {
-  lockdown();
+  lockdown({
+    onDetected: () => {
+      // Optional analytics beacon or logging
+    },
+  });
 }
 
-// ... rest of your app bootstrap
+ReactDOM.createRoot(document.getElementById('root')!).render(<App />);
 ```
 
-**Next.js**
+### Next.js (App Router)
+
 ```tsx
-// app/layout.tsx or _app.tsx
+// app/providers.tsx or client component mounted in app/layout.tsx
 'use client';
+
 import { useEffect } from 'react';
 import { lockdown } from 'devtools-lockdown';
 
-export default function RootLayout({ children }) {
+export function SecurityGuard() {
   useEffect(() => {
     if (process.env.NODE_ENV === 'production') {
       lockdown();
     }
   }, []);
 
-  return <html><body>{children}</body></html>;
+  return null;
 }
 ```
 
-**Vue**
-```ts
-// main.ts
+```tsx
+// app/layout.tsx
+import { SecurityGuard } from './providers';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        <SecurityGuard />
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+### Vue 3
+
+```typescript
+// src/main.ts
+import { createApp } from 'vue';
 import { lockdown } from 'devtools-lockdown';
+import App from './App.vue';
 
 if (import.meta.env.PROD) {
   lockdown();
 }
 
-// ... createApp, mount, etc.
+createApp(App).mount('#app');
 ```
 
-**Vanilla JS / script tag**
+### Vanilla HTML / Script Tag
+
 ```html
 <script type="module">
-  import { lockdown } from './devtools-lockdown/dist/index.js';
+  import { lockdown } from './dist/index.js';
   lockdown();
 </script>
 ```
 
-### Detection-only mode
+---
 
-If you want to know when DevTools opens but don't want to nuke the page:
+## Configuration Options
 
-```js
+Pass a `LockdownOptions` object to customize behavior:
+
+```typescript
+import { lockdown } from 'devtools-lockdown';
+
+lockdown({
+  // ── Detection Callbacks ──────────────────────────────
+  onDetected: () => {
+    // Send security alert before page wipe
+  },
+
+  // ── Trap Timings & Thresholds ────────────────────────
+  threshold: 100,            // Debugger pause threshold (ms)
+  trapInterval: 1000,        // Debugger check loop interval (ms)
+  probeInterval: 3000,       // Element probe interval (ms)
+  sizeInterval: 800,         // Window size check interval (ms)
+  sizeThreshold: 160,        // Outer-inner delta threshold (px)
+
+  // ── Layer Toggles ────────────────────────────────────
+  detectDebugger: true,      // Enable debugger timing trap
+  detectSize: true,          // Enable window size delta checks
+  detectElement: true,       // Enable console bait element probe
+  neutralizeConsole: true,   // Clear and no-op console.*
+  blockShortcuts: true,      // Intercept F12, Ctrl+Shift+I, etc.
+  blockContextMenu: true,    // Disable right-click
+  blockDrag: true,           // Disable drag-and-drop saving
+
+  // ── Detection Response ───────────────────────────────
+  killNetwork: true,         // Kill fetch, XHR, WebSocket, Beacon
+  killPage: true,            // Eradicate DOM and redirect
+  redirectUrl: 'about:blank',// URL to redirect on wipe
+
+  // ── Environmental Safeguards ─────────────────────────
+  allowAuditBots: true,      // Skip for Lighthouse, PageSpeed, WebDriver
+  desktopOnlyDetection: true,// Skip debugger traps on mobile devices
+});
+```
+
+### Options Reference Table
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `onDetected` | `() => void` | `() => {}` | Hook called immediately upon detection before page wipe. |
+| `threshold` | `number` | `100` | Debugger execution delay threshold in ms. |
+| `trapInterval` | `number` | `1000` | Frequency of `setInterval` debugger trap in ms. |
+| `probeInterval` | `number` | `3000` | Frequency of element probe `console.debug` checks in ms. |
+| `sizeInterval` | `number` | `800` | Frequency of window geometry checks in ms. |
+| `sizeThreshold` | `number` | `160` | Pixel delta between outer and inner window bounds. |
+| `detectDebugger` | `boolean` | `true` | Enables dual-channel debugger traps. |
+| `detectSize` | `boolean` | `true` | Enables viewport geometry checks for docked DevTools. |
+| `detectElement` | `boolean` | `true` | Enables DOM getter probe for console inspect. |
+| `killNetwork` | `boolean` | `true` | Neutralizes `fetch`, `XMLHttpRequest`, `WebSocket`, and `sendBeacon`. |
+| `killPage` | `boolean` | `true` | Eradicates DOM and redirects browser. |
+| `redirectUrl` | `string` | `'about:blank'` | Redirection destination when page is wiped. |
+| `neutralizeConsole` | `boolean` | `true` | Replaces console methods with no-ops. |
+| `blockShortcuts` | `boolean` | `true` | Intercepts inspection keyboard shortcuts. |
+| `blockContextMenu` | `boolean` | `true` | Disables right-click context menu. |
+| `blockDrag` | `boolean` | `true` | Disables dragstart event propagation. |
+| `allowAuditBots` | `boolean` | `true` | Bypasses detection for Lighthouse/PageSpeed/WebDriver. |
+| `desktopOnlyDetection` | `boolean` | `true` | Prevents false positives from mobile viewport resize/keyboards. |
+
+---
+
+## Detection-Only Mode (Telemetry Mode)
+
+If you wish to log DevTools usage without destroying the page:
+
+```typescript
 import { lockdown, wasDetected } from 'devtools-lockdown';
 
 lockdown({
   killPage: false,
+  killNetwork: false,
   onDetected: () => {
-    // Log it, show a warning, watermark the page, do whatever you want
-    document.body.textContent = 'Nice try.';
+    console.info('Security: DevTools opening recorded.');
   },
 });
 ```
 
-## Options reference
+---
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `onDetected` | `() => void` | no-op | Callback fired right before the page is wiped |
-| `trapInterval` | `number` | `1000` | Debugger trap check interval (ms) |
-| `probeInterval` | `number` | `3000` | Element probe check interval (ms) |
-| `threshold` | `number` | `100` | Debugger pause detection threshold (ms) |
-| `killPage` | `boolean` | `true` | Wipe the page and kill network on detection |
-| `blockShortcuts` | `boolean` | `true` | Intercept F12, Ctrl+Shift+I, Ctrl+U, etc. |
-| `blockContextMenu` | `boolean` | `true` | Disable right-click |
-| `neutralizeConsole` | `boolean` | `true` | Replace all console methods with no-ops |
-| `blockDrag` | `boolean` | `true` | Prevent drag-to-save |
+## Bundler Configuration Notice
 
-## What happens on detection
+### Vite / Rollup / Terser / esbuild
 
-This is the kill sequence, in order:
+When minifying your production bundle, ensure your minifier does **not** strip `debugger` statements or blanket-remove `console` statements if you rely on the element bait probe:
 
-1. **`onDetected` callback** fires (if you provided one)
-2. **Network killed** — `fetch`, `XMLHttpRequest`, `WebSocket`, and `sendBeacon` are all replaced with stubs that do nothing
-3. **DOM wiped** — every child node of `<html>` is removed
-4. **Page title cleared**
-5. **Navigation to `about:blank`** — prevents back-button recovery
+#### Vite (`vite.config.ts`):
+```typescript
+export default defineConfig({
+  build: {
+    minify: 'terser',
+    terserOptions: {
+      compress: {
+        // IMPORTANT: Must be false so the timing debugger trap remains active
+        drop_debugger: false,
+        // IMPORTANT: Must be false so console.debug(baitElement) can trigger the getter trap
+        drop_console: false,
+        pure_funcs: ['console.log', 'console.info'], // Optional: strip normal logs
+      },
+    },
+  },
+});
+```
 
-Steps 2-5 only happen if `killPage` is `true` (the default).
+---
 
-## Limitations
+## Exported Utilities
 
-This is a **deterrent**, not a security boundary. Determined people can bypass client-side protections. A few realities:
+In addition to `lockdown()`, modular standalone helpers are exported:
 
-- Someone can disable JavaScript entirely and view your HTML source.
-- A proxy (Fiddler, Charles, mitmproxy) captures network traffic regardless.
-- Browser extensions can inject scripts before your code runs.
-- The truly motivated will just read the minified bundle.
+```typescript
+import {
+  lockdown,
+  initDevtoolsGuard,    // Alias for lockdown()
+  wasDetected,          // Returns boolean
+  isInitialized,        // Returns boolean
+  isAuditBot,           // Returns boolean
+  isDesktop,            // Returns boolean
+  killNetwork,          // Standalone network kill switch
+  wipePage,             // Standalone DOM & page wipe
+  neutralizeConsole,    // Standalone console sanitizer
+  resetState,           // Reset state (useful in test suites)
+} from 'devtools-lockdown';
+```
 
-**Real security happens server-side** — auth, rate limiting, input validation, access control. This library is about raising the effort required for casual inspection, not replacing actual security architecture.
+---
 
-That said, it does stop the vast majority of curious users who just hit F12 to see what's going on. And for many apps, that's exactly what you need.
+## Security In Perspective
 
-## Why not just use CSP / obfuscation / etc.?
+> **Client-side security is defense-in-depth, not an authentication boundary.**
 
-- **CSP** controls what scripts can run, not whether DevTools can open.
-- **Obfuscation** makes code harder to read but doesn't prevent inspection.
-- **This** actively detects and responds to DevTools being open.
+* An attacker with local machine access can run a network proxy (mitmproxy, Charles, Wireshark).
+* Scripts injected via malicious browser extensions can bypass client code.
+* A user can disable JavaScript entirely to inspect static HTML markup.
 
-They're complementary. Use all of them if you're serious about it.
+`devtools-lockdown` is designed to deter casual tampering, inspection, and unauthorized reverse-engineering of client state. Combine with robust **server-side authentication, CORS, rate limiting, and Content Security Policy (CSP)**.
 
-## Browser support
-
-Works on all modern browsers (Chrome, Firefox, Safari, Edge). The debugger timing trap is the most reliable detection method and works across all of them. The element probe is Chrome/Edge-specific (Firefox and Safari don't evaluate console-logged objects the same way), but the timing trap covers those browsers.
+---
 
 ## License
 
-MIT
+MIT © [Alex Tsanis](https://github.com/dragonGR)

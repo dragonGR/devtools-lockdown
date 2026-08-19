@@ -1,27 +1,36 @@
 {
   "name": "devtools-lockdown",
   "version": "1.0.0",
-  "description": "Drop-in DevTools detection and page protection for production web apps",
+  "description": "Production-grade anti-DevTools detection and page protection for modern web apps",
   "type": "module",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "require": "./dist/index.cjs",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.cjs"
     }
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "README.md",
+    "LICENSE"
   ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts --clean",
     "dev": "tsup src/index.ts --format esm,cjs --dts --watch",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run typecheck && npm run build"
   },
   "keywords": [
     "devtools",
@@ -33,20 +42,13 @@
     "production",
     "lockdown",
     "inspect",
-    "browser-security"
+    "browser-security",
+    "anti-tamper",
+    "client-security"
   ],
-  "author": "Alex Tsanis <alex@debtman.dev>",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/dragonGR/devtools-lockdown"
-  },
-  "homepage": "https://github.com/dragonGR/devtools-lockdown#readme",
-  "bugs": {
-    "url": "https://github.com/dragonGR/devtools-lockdown/issues"
-  },
   "devDependencies": {
-    "tsup": "^8.0.0",
+    "tsup": "^8.5.1",
     "typescript": "^5.7.0"
   }
 }
